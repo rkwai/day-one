@@ -90,8 +90,27 @@ export default function Home() {
         
         try {
           const errorData = JSON.parse(errorText);
-          throw new Error(errorData.error || 'Failed to process response');
+          
+          // If this is an LLM error (status 503), keep the input for retry
+          if (res.status === 503 && errorData.retryInput) {
+            // Remove the player's input from the story since we'll retry
+            setGameState(prev => prev ? {
+              ...prev,
+              story: prev.story.slice(0, -1) // Remove the last entry (player input)
+            } : null);
+            
+            // Keep the input in the field for retry
+            setInput(errorData.retryInput);
+            
+            throw new Error(errorData.error || 'AI service unavailable. Please try again.');
+          } else {
+            // For other errors, clear the input
+            setInput('');
+            throw new Error(errorData.error || 'Failed to process response');
+          }
         } catch (parseError) {
+          // Clear input for non-retry errors
+          setInput('');
           throw new Error('Failed to process response: ' + errorText);
         }
       }
@@ -100,7 +119,7 @@ export default function Home() {
       console.log('Response data:', data);
       
       setGameState(data.state);
-      setInput(''); // Clear input field
+      setInput(''); // Clear input field on success
       
       // Focus input after response is received
       setTimeout(focusInput, 100);
@@ -145,8 +164,13 @@ export default function Home() {
         <h1 className="text-4xl font-bold text-center text-white mb-8">Text Adventure</h1>
         
         {error && (
-          <div className="bg-red-500/20 border border-red-500 text-red-200 p-3 rounded-md mb-4">
-            {error}
+          <div className="bg-red-500/20 border border-red-500 text-red-200 p-3 rounded-md mb-4 flex flex-col">
+            <div className="mb-2">{error}</div>
+            {input && (
+              <div className="text-sm text-red-300">
+                Your input has been preserved. Click Submit to try again.
+              </div>
+            )}
           </div>
         )}
         
@@ -166,22 +190,56 @@ export default function Home() {
                 </span>
               </div>
             </div>
+            
+            {/* Recent Events Section */}
+            {gameState?.recentEvents && gameState.recentEvents.length > 0 && (
+              <div className="mt-3 mb-3 bg-slate-700/30 p-3 rounded-md border border-slate-600/50">
+                <h3 className="text-sm font-semibold text-slate-300 mb-1">Recent Events:</h3>
+                <ul className="text-xs space-y-1">
+                  {gameState.recentEvents.map((event, index) => (
+                    <li key={index} className="text-amber-200/80">
+                      • {typeof event === 'string' && !event.startsWith('{') ? 
+                          event.replace(/\*/g, '').replace(/\{|\}/g, '') : 
+                          'An event occurred'}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </CardHeader>
           <CardContent className="p-0">
             <div className="story p-6 max-h-[50vh] overflow-y-auto space-y-4 text-lg leading-relaxed">
-              {gameState?.story.map((segment, index) => (
-                <p 
-                  key={index} 
-                  className={segment.startsWith('>') 
-                    ? 'text-sky-300 font-medium italic' 
-                    : 'text-slate-100'
-                  }
-                >
-                  {segment.startsWith('>') ? segment : segment.split('. ').join('. ').replace(/\.\s+/g, '.\n\n')}
-                </p>
-              ))}
+              {gameState?.story.map((segment, index) => {
+                // Skip segments that look like JSON
+                if (segment.trim().startsWith('{') || segment.trim().startsWith('```json')) {
+                  return null;
+                }
+                
+                return (
+                  <p 
+                    key={index} 
+                    className={segment.startsWith('>') 
+                      ? 'text-sky-300 font-medium italic bg-slate-700/30 p-2 rounded-md' 
+                      : 'text-slate-100 bg-slate-800/50 p-3 rounded-md'
+                    }
+                  >
+                    {segment.startsWith('>') 
+                      ? segment 
+                      : segment
+                          // Remove JSON formatting artifacts
+                          .replace(/\*/g, '')
+                          .replace(/\{|\}/g, '')
+                          // Improve readability
+                          .split('. ')
+                          .join('. ')
+                          .replace(/\.\s+/g, '.\n\n')}
+                  </p>
+                );
+              })}
               {isLoading && (
-                <p className="text-amber-200 animate-pulse">The story unfolds...</p>
+                <p className="text-amber-200 animate-pulse bg-slate-700/30 p-2 rounded-md">
+                  The story unfolds...
+                </p>
               )}
             </div>
             

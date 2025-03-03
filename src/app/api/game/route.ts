@@ -65,14 +65,23 @@ export async function POST(request: NextRequest) {
       const prompt = buildPrompt(state, input);
       console.log('Generated prompt:', prompt);
       
-      const llmOutput = await getLLMResponse(prompt);
-      console.log('LLM response:', llmOutput);
-      
-      updateState(state, llmOutput);
-      state.story.push(llmOutput);
-      
-      console.log('Updated state:', { location: state.location, inventory: state.inventory });
-      return NextResponse.json({ state });
+      try {
+        const llmOutput = await getLLMResponse(prompt);
+        console.log('LLM response:', llmOutput);
+        
+        updateState(state, llmOutput);
+        state.story.push(llmOutput);
+        
+        console.log('Updated state:', { location: state.location, inventory: state.inventory });
+        return NextResponse.json({ state });
+      } catch (error) {
+        console.error('Error getting LLM response:', error);
+        // Return a specific error code for LLM failures
+        return NextResponse.json({ 
+          error: error instanceof Error ? error.message : 'Failed to get AI response. Please try again.',
+          retryInput: input // Return the original input so client can retry
+        }, { status: 503 }); // 503 Service Unavailable
+      }
     } else {
       console.log('Invalid action:', action);
       return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
@@ -99,12 +108,21 @@ Current Game State:
   const instruction = `
 Respond with a vivid, descriptive narrative (2-4 sentences) that advances the story based on the player's input.
 
-Important formatting rules:
-1. If the player finds an item, explicitly state "You find {item}" with curly braces around the item name.
-2. If the player moves to a new location, explicitly state "You move to *location*" with asterisks around the location name.
-3. Include sensory details and create an immersive experience.
-4. Keep your response focused and concise.
-5. Never break character as the Dungeon Master.
+IMPORTANT: Your response MUST be a valid JSON object with the following structure:
+{
+  "narrative": "Your vivid, descriptive narrative goes here (2-4 sentences)",
+  "inventory": ["item1", "item2", "item3"],
+  "location": "current_location",
+  "recentEvents": ["Most recent event"]
+}
+
+Guidelines for the JSON response:
+1. The "narrative" field should contain your vivid, descriptive response (2-4 sentences).
+2. The "inventory" field should be an array containing ALL items the player has, including both previous items and any new ones.
+3. The "location" field should be the player's current location after their action.
+4. The "recentEvents" field should contain the most recent significant event.
+5. Make sure your JSON is valid and properly formatted with double quotes around keys and string values.
+6. Do not include any text outside the JSON object.
 `;
   
   return `${world}\n\n${context}\n\n${action}\n\n${instruction}`;
@@ -112,105 +130,142 @@ Important formatting rules:
 
 // Fetch response from OpenRouter/DeepSeek
 async function getLLMResponse(prompt: string): Promise<string> {
-  try {
-    // Check if API key is set
-    if (!process.env.OPENROUTER_API_KEY) {
-      console.error('OPENROUTER_API_KEY is not set in environment variables');
-      return getFallbackResponse();
-    }
-    
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://day-one-adventure-game.vercel.app',
-        'X-Title': 'Text Adventure Game'
-      },
-      body: JSON.stringify({
-        model: 'deepseek/deepseek-r1:free',
-        messages: [
-          {
-            role: 'system',
-            content: `You are a creative Dungeon Master for a text adventure game. 
-            
+  // Check if API key is set
+  if (!process.env.OPENROUTER_API_KEY) {
+    console.error('OPENROUTER_API_KEY is not set in environment variables');
+    throw new Error('API key not configured. Please check server configuration.');
+  }
+  
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'HTTP-Referer': 'https://day-one-adventure-game.vercel.app',
+      'X-Title': 'Text Adventure Game'
+    },
+    body: JSON.stringify({
+      model: 'deepseek/deepseek-r1:free',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a creative Dungeon Master for a text adventure game. 
+          
 Your responses should be vivid, descriptive, and immersive, using sensory details to bring the fantasy world to life.
 
 IMPORTANT FORMATTING RULES:
-- Keep responses between 2-4 sentences for readability
-- When the player finds an item, explicitly state "You find {item}" with curly braces around the item name
-- When the player moves to a new location, explicitly state "You move to *location*" with asterisks around the location name
+- Your response MUST be a valid JSON object
+- Keep narrative responses between 2-4 sentences for readability
+- Include sensory details and create an immersive experience
 - Never break character as the Dungeon Master
-- Focus on advancing the story based on player input`
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        max_tokens: 1500,
-        temperature: 0.7
-      }),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Error calling OpenRouter API:', errorText);
-      return getFallbackResponse();
-    }
-    
-    const data = await response.json();
-    const responseText = data.choices && data.choices[0]?.message?.content?.trim();
-    
-    // If response is empty or undefined, use fallback
-    if (!responseText) {
-      console.warn('Empty response from OpenRouter API, using fallback');
-      return getFallbackResponse();
-    }
-    
-    return responseText;
-  } catch (error) {
-    console.error('Exception calling OpenRouter API:', error);
-    return getFallbackResponse();
-  }
-}
-
-// Fallback responses if the API call fails
-function getFallbackResponse(): string {
-  const responses = [
-    "The village square bustles with activity. Merchants hawk their wares from colorful stalls while children chase each other between the legs of browsing customers. You notice a weathered tavern with a creaking wooden sign to the north and a narrow path leading into dense forest to the east.",
-    
-    "You move to *forest path*. Sunlight filters through the dense canopy, creating dappled patterns on the forest floor. The air grows cooler as the trees press closer, and you hear rustling in the underbrush nearby—something or someone is watching your progress.",
-    
-    "You find {rusty iron key} and {pouch of gold coins}. The ornate wooden chest was partially hidden beneath fallen leaves and moss. The key has strange markings etched into its surface, and the leather pouch jingles with the weight of its contents.",
-    
-    "As twilight descends, you spot a faint amber glow between the trees ahead. Drawing closer, you make out a small cabin with smoke curling from its chimney. The windows are shuttered, but you hear faint humming from within.",
-    
-    "The village elder approaches, leaning on a gnarled wooden staff. 'Welcome, traveler,' she says, her eyes reflecting wisdom beyond her years. 'Our village has been troubled by strange noises from the forest at night. Would you investigate for us? We fear something dangerous has awakened in the ancient ruins.'",
-  ];
+- Focus on advancing the story based on player input
+- Make sure your JSON is properly formatted with double quotes around keys and string values`
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      max_tokens: 1500,
+      temperature: 0.7
+    }),
+  });
   
-  return responses[Math.floor(Math.random() * responses.length)];
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('Error calling OpenRouter API:', errorText);
+    throw new Error('Failed to get response from AI service. Please try again.');
+  }
+  
+  const data = await response.json();
+  const responseText = data.choices && data.choices[0]?.message?.content?.trim();
+  
+  // If response is empty or undefined, throw error
+  if (!responseText) {
+    console.warn('Empty response from OpenRouter API');
+    throw new Error('Received empty response from AI service. Please try again.');
+  }
+  
+  return responseText;
 }
 
 // Update game state based on LLM response
 function updateState(state: GameState, response: string) {
-  // Format the response for better readability if needed
-  const formattedResponse = response.trim();
-  console.log('Processing response for state update:', formattedResponse);
+  console.log('Processing response for state update:', response);
   
-  // Check for location changes using the new asterisk format
-  const locationRegex = /you (?:move|arrive|travel|venture|go|enter|reach|find yourself|step) to \*([\w\s]+)\*/i;
-  if (locationRegex.test(formattedResponse)) {
-    const match = locationRegex.exec(formattedResponse);
-    if (match && match[1]) {
+  try {
+    // Try to parse the response as JSON
+    let jsonResponse;
+    
+    // Extract JSON if it's wrapped in markdown code blocks
+    if (response.includes('```json')) {
+      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonMatch && jsonMatch[1]) {
+        jsonResponse = JSON.parse(jsonMatch[1]);
+      }
+    } else {
+      // Try to parse the raw response
+      jsonResponse = JSON.parse(response);
+    }
+    
+    if (jsonResponse) {
+      console.log('Successfully parsed JSON response:', jsonResponse);
+      
+      // Update narrative in story array
+      if (jsonResponse.narrative) {
+        state.story[state.story.length - 1] = jsonResponse.narrative;
+      }
+      
+      // Update location if provided
+      if (jsonResponse.location) {
+        state.location = jsonResponse.location.toLowerCase().trim();
+        console.log(`Location updated to: ${state.location}`);
+      }
+      
+      // Update inventory if provided
+      if (Array.isArray(jsonResponse.inventory) && jsonResponse.inventory.length > 0) {
+        // Replace the entire inventory with the new one
+        state.inventory = jsonResponse.inventory.map((item: string) => item.toLowerCase().trim());
+        console.log(`Inventory updated to: ${state.inventory.join(', ')}`);
+      }
+      
+      // Update recent events if provided
+      if (Array.isArray(jsonResponse.recentEvents) && jsonResponse.recentEvents.length > 0) {
+        // Add new events to recent events
+        const events: string[] = jsonResponse.recentEvents;
+        for (const event of events) {
+          if (state.recentEvents.length >= 5) {
+            state.recentEvents.shift(); // Remove oldest event if we have 5 already
+          }
+          state.recentEvents.push(event);
+        }
+        console.log(`Recent events updated: ${state.recentEvents.join(', ')}`);
+      }
+      
+      return;
+    }
+  } catch (error) {
+    console.error('Error parsing JSON response:', error);
+    console.log('Falling back to regex parsing for response');
+  }
+  
+  // Fallback to regex parsing if JSON parsing fails
+  const formattedResponse = response.trim();
+  
+  // Check for location changes using the asterisk format
+  const locationRegex = /\*([\w\s]+)\*/gi;
+  let locationMatch;
+  while ((locationMatch = locationRegex.exec(formattedResponse)) !== null) {
+    if (locationMatch && locationMatch[1]) {
       // Convert location to lowercase to standardize
-      state.location = match[1].toLowerCase().trim();
+      state.location = locationMatch[1].toLowerCase().trim();
       console.log(`Location updated to: ${state.location}`);
+      break; // Only use the first location match
     }
   }
   
-  // Check for item acquisition using the new curly brace format
-  const itemRegex = /you find \{([\w\s]+)\}/gi;
+  // Check for item acquisition using the curly brace format
+  const itemRegex = /\{([\w\s]+)\}/gi;
   let itemMatch;
   while ((itemMatch = itemRegex.exec(formattedResponse)) !== null) {
     if (itemMatch && itemMatch[1]) {
